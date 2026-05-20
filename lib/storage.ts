@@ -7,49 +7,98 @@ export type Item = {
   createdAt: number;
 };
 
+export type Scores = Record<string, { wins: number; championships: number }>;
+
 const KV_KEY = "worldcup:items";
 const KV_SCORES_KEY = "worldcup:scores";
 const LOCAL_FILE = path.join(process.cwd(), "data", "local.json");
 const LOCAL_SCORES_FILE = path.join(process.cwd(), "data", "scores.json");
 
-export type Scores = Record<string, { wins: number; championships: number }>;
-
-function hasKV(): boolean {
-  return Boolean(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN);
+function getRedisCreds(): { url: string; token: string } | null {
+  const url =
+    process.env.KV_REST_API_URL ||
+    process.env.UPSTASH_REDIS_REST_URL ||
+    "";
+  const token =
+    process.env.KV_REST_API_TOKEN ||
+    process.env.UPSTASH_REDIS_REST_TOKEN ||
+    "";
+  if (!url || !token) return null;
+  return { url, token };
 }
 
-async function readLocal(): Promise<Item[]> {
+type RedisLike = {
+  get: <T>(key: string) => Promise<T | null>;
+  set: (key: string, value: unknown) => Promise<unknown>;
+};
+
+let cachedClient: RedisLike | null = null;
+
+async function getRedis(): Promise<RedisLike | null> {
+  if (cachedClient) return cachedClient;
+  const creds = getRedisCreds();
+  if (!creds) return null;
+  const { Redis } = await import("@upstash/redis");
+  cachedClient = new Redis(creds) as unknown as RedisLike;
+  return cachedClient;
+}
+
+function isServerless(): boolean {
+  return Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+}
+
+function noStorageError(): Error {
+  return new Error(
+    "스토리지가 설정되지 않았습니다. Vercel 대시보드에서 Upstash Redis 통합을 추가하고 KV_REST_API_URL / KV_REST_API_TOKEN(또는 UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN) 환경변수가 주입되었는지 확인한 뒤 재배포하세요."
+  );
+}
+
+async function readLocal<T>(file: string, fallback: T): Promise<T> {
   try {
-    const raw = await fs.readFile(LOCAL_FILE, "utf8");
+    const raw = await fs.readFile(file, "utf8");
     const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) return parsed as Item[];
-    return [];
+    return parsed as T;
   } catch {
-    return [];
+    return fallback;
   }
 }
 
-async function writeLocal(items: Item[]): Promise<void> {
-  await fs.mkdir(path.dirname(LOCAL_FILE), { recursive: true });
-  await fs.writeFile(LOCAL_FILE, JSON.stringify(items, null, 2), "utf8");
+async function writeLocal(file: string, value: unknown): Promise<void> {
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, JSON.stringify(value, null, 2), "utf8");
+}
+
+async function readKey<T>(key: string, file: string, fallback: T): Promise<T> {
+  const redis = await getRedis();
+  if (redis) {
+    const v = await redis.get<T>(key);
+    return v ?? fallback;
+  }
+  if (isServerless()) {
+    throw noStorageError();
+  }
+  return readLocal(file, fallback);
+}
+
+async function writeKey(key: string, file: string, value: unknown): Promise<void> {
+  const redis = await getRedis();
+  if (redis) {
+    await redis.set(key, value);
+    return;
+  }
+  if (isServerless()) {
+    throw noStorageError();
+  }
+  await writeLocal(file, value);
 }
 
 export async function getItems(): Promise<Item[]> {
-  if (hasKV()) {
-    const { kv } = await import("@vercel/kv");
-    const data = (await kv.get<Item[]>(KV_KEY)) ?? [];
-    return data;
-  }
-  return readLocal();
+  const arr = await readKey<Item[]>(KV_KEY, LOCAL_FILE, []);
+  return Array.isArray(arr) ? arr : [];
 }
 
 async function saveItems(items: Item[]): Promise<void> {
-  if (hasKV()) {
-    const { kv } = await import("@vercel/kv");
-    await kv.set(KV_KEY, items);
-    return;
-  }
-  await writeLocal(items);
+  await writeKey(KV_KEY, LOCAL_FILE, items);
 }
 
 export async function addItem(text: string): Promise<Item> {
@@ -85,38 +134,13 @@ export async function replaceItems(items: Item[]): Promise<void> {
   await saveItems(items);
 }
 
-async function readLocalScores(): Promise<Scores> {
-  try {
-    const raw = await fs.readFile(LOCAL_SCORES_FILE, "utf8");
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === "object") return parsed as Scores;
-    return {};
-  } catch {
-    return {};
-  }
-}
-
-async function writeLocalScores(scores: Scores): Promise<void> {
-  await fs.mkdir(path.dirname(LOCAL_SCORES_FILE), { recursive: true });
-  await fs.writeFile(LOCAL_SCORES_FILE, JSON.stringify(scores, null, 2), "utf8");
-}
-
 export async function getScores(): Promise<Scores> {
-  if (hasKV()) {
-    const { kv } = await import("@vercel/kv");
-    const data = (await kv.get<Scores>(KV_SCORES_KEY)) ?? {};
-    return data;
-  }
-  return readLocalScores();
+  const v = await readKey<Scores>(KV_SCORES_KEY, LOCAL_SCORES_FILE, {});
+  return v && typeof v === "object" ? v : {};
 }
 
 async function saveScores(scores: Scores): Promise<void> {
-  if (hasKV()) {
-    const { kv } = await import("@vercel/kv");
-    await kv.set(KV_SCORES_KEY, scores);
-    return;
-  }
-  await writeLocalScores(scores);
+  await writeKey(KV_SCORES_KEY, LOCAL_SCORES_FILE, scores);
 }
 
 export async function recordResult(

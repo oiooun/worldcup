@@ -15,6 +15,15 @@ export default function AdminPanel({ initialItems }: Props) {
   const [editingText, setEditingText] = useState("");
   const [error, setError] = useState<string | null>(null);
 
+  async function readError(res: Response, fallback: string): Promise<string> {
+    try {
+      const data = (await res.json()) as { error?: string };
+      return data?.error || fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
   async function add(e: React.FormEvent) {
     e.preventDefault();
     const trimmed = text.trim();
@@ -28,14 +37,14 @@ export default function AdminPanel({ initialItems }: Props) {
         body: JSON.stringify({ text: trimmed }),
       });
       if (!res.ok) {
-        setError("추가에 실패했습니다.");
+        setError(await readError(res, "추가에 실패했습니다."));
         return;
       }
       const { item } = (await res.json()) as { item: Item };
       setItems((cur) => [...cur, item]);
       setText("");
-    } catch {
-      setError("네트워크 오류");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "네트워크 오류");
     } finally {
       setSubmitting(false);
     }
@@ -43,11 +52,12 @@ export default function AdminPanel({ initialItems }: Props) {
 
   async function remove(id: string) {
     if (!confirm("정말 삭제할까요?")) return;
+    setError(null);
     const res = await fetch(`/api/items?id=${encodeURIComponent(id)}`, {
       method: "DELETE",
     });
     if (!res.ok) {
-      setError("삭제에 실패했습니다.");
+      setError(await readError(res, "삭제에 실패했습니다."));
       return;
     }
     setItems((cur) => cur.filter((i) => i.id !== id));
@@ -62,13 +72,14 @@ export default function AdminPanel({ initialItems }: Props) {
     if (!editingId) return;
     const trimmed = editingText.trim();
     if (!trimmed) return;
+    setError(null);
     const res = await fetch("/api/items", {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ id: editingId, text: trimmed }),
     });
     if (!res.ok) {
-      setError("수정에 실패했습니다.");
+      setError(await readError(res, "수정에 실패했습니다."));
       return;
     }
     const { item } = (await res.json()) as { item: Item };
