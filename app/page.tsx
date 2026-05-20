@@ -36,9 +36,6 @@ export default async function HomePage() {
           </h1>
           <div className="subtitle">토너먼트로 가장 별로인 사람을 가려봅시다</div>
         </div>
-        <nav className="nav-links">
-          <Link className="btn ghost" href="/admin">관리자</Link>
-        </nav>
       </header>
 
       {storageError && (
@@ -76,6 +73,9 @@ export default async function HomePage() {
             <Link className="btn primary xl" href="/play">
               월드컵 시작하기 →
             </Link>
+            <Link className="btn xl ghost" href="/rankings">
+              📊 친구들의 순위 보기
+            </Link>
             <div className="muted center" style={{ fontSize: 13 }}>
               총 {items.length - 1}경기로 최악의 한 명이 결정됩니다
             </div>
@@ -87,12 +87,16 @@ export default async function HomePage() {
                 ? "아직 등록된 후보가 없습니다."
                 : "후보가 2명 이상이어야 시작할 수 있습니다."}
             </div>
-            <Link className="btn primary xl" href="/admin">
-              관리자로 후보 추가 →
+            <Link className="btn xl ghost" href="/rankings">
+              📊 친구들의 순위 보기
             </Link>
           </div>
         )}
       </section>
+
+      <footer className="site-footer">
+        <Link href="/admin" className="admin-link">관리자</Link>
+      </footer>
     </main>
   );
 }

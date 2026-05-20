@@ -7,7 +7,13 @@ export type Item = {
   createdAt: number;
 };
 
-export type Scores = Record<string, { wins: number; championships: number }>;
+export type ScoreEntry = {
+  wins: number;
+  championships: number;
+  appearances: number;
+};
+
+export type Scores = Record<string, ScoreEntry>;
 
 export type Stats = {
   scores: Scores;
@@ -17,6 +23,7 @@ export type Stats = {
 const KV_ITEMS_KEY = "worldcup:items";
 const KV_WINS_KEY = "worldcup:wins";
 const KV_CHAMPS_KEY = "worldcup:champs";
+const KV_APPEARANCES_KEY = "worldcup:appearances";
 const KV_TOURNEYS_KEY = "worldcup:tournaments";
 
 const LOCAL_ITEMS_FILE = path.join(process.cwd(), "data", "local.json");
@@ -142,40 +149,70 @@ export async function replaceItems(items: Item[]): Promise<void> {
 
 // ----- Stats / Scoring -----
 
-function mergeScores(wins: RedisHash, champs: RedisHash): Scores {
+function ensureEntry(s: Scores, id: string): ScoreEntry {
+  if (!s[id]) s[id] = { wins: 0, championships: 0, appearances: 0 };
+  return s[id];
+}
+
+function mergeScores(wins: RedisHash, champs: RedisHash, apps: RedisHash): Scores {
   const result: Scores = {};
   if (wins) {
     for (const [id, v] of Object.entries(wins)) {
       const n = Number(v);
-      if (!Number.isFinite(n) || n === 0) continue;
-      result[id] = { wins: n, championships: 0 };
+      if (Number.isFinite(n) && n !== 0) ensureEntry(result, id).wins = n;
     }
   }
   if (champs) {
     for (const [id, v] of Object.entries(champs)) {
       const n = Number(v);
-      if (!Number.isFinite(n) || n === 0) continue;
-      if (!result[id]) result[id] = { wins: 0, championships: 0 };
-      result[id].championships = n;
+      if (Number.isFinite(n) && n !== 0) ensureEntry(result, id).championships = n;
+    }
+  }
+  if (apps) {
+    for (const [id, v] of Object.entries(apps)) {
+      const n = Number(v);
+      if (Number.isFinite(n) && n !== 0) ensureEntry(result, id).appearances = n;
+    }
+  }
+  for (const id of Object.keys(result)) {
+    if (result[id].appearances < result[id].wins) {
+      result[id].appearances = result[id].wins;
     }
   }
   return result;
 }
 
 async function readLocalStats(): Promise<Stats> {
-  const fresh = await readLocal<{ scores?: Scores; tournaments?: number } | null>(
-    LOCAL_STATS_FILE,
-    null
-  );
+  const fresh = await readLocal<{
+    scores?: Record<string, Partial<ScoreEntry>>;
+    tournaments?: number;
+  } | null>(LOCAL_STATS_FILE, null);
   if (fresh && typeof fresh === "object" && "scores" in fresh) {
+    const normalized: Scores = {};
+    for (const [id, s] of Object.entries(fresh.scores ?? {})) {
+      const wins = Number(s?.wins) || 0;
+      const championships = Number(s?.championships) || 0;
+      const appearances = Math.max(Number(s?.appearances) || 0, wins);
+      normalized[id] = { wins, championships, appearances };
+    }
     return {
-      scores: (fresh.scores as Scores) ?? {},
+      scores: normalized,
       tournaments: Number(fresh.tournaments) || 0,
     };
   }
-  const old = await readLocal<Scores | null>(LOCAL_OLD_SCORES_FILE, null);
+  const old = await readLocal<Record<string, Partial<ScoreEntry>> | null>(
+    LOCAL_OLD_SCORES_FILE,
+    null
+  );
   if (old && typeof old === "object") {
-    return { scores: old, tournaments: 0 };
+    const normalized: Scores = {};
+    for (const [id, s] of Object.entries(old)) {
+      const wins = Number(s?.wins) || 0;
+      const championships = Number(s?.championships) || 0;
+      const appearances = Math.max(Number(s?.appearances) || 0, wins);
+      normalized[id] = { wins, championships, appearances };
+    }
+    return { scores: normalized, tournaments: 0 };
   }
   return { scores: {}, tournaments: 0 };
 }
@@ -183,13 +220,14 @@ async function readLocalStats(): Promise<Stats> {
 export async function getStats(): Promise<Stats> {
   const redis = await getRedis();
   if (redis) {
-    const [wins, champs, tourneys] = await Promise.all([
+    const [wins, champs, apps, tourneys] = await Promise.all([
       redis.hgetall(KV_WINS_KEY),
       redis.hgetall(KV_CHAMPS_KEY),
+      redis.hgetall(KV_APPEARANCES_KEY),
       redis.get<number | string>(KV_TOURNEYS_KEY),
     ]);
     return {
-      scores: mergeScores(wins, champs),
+      scores: mergeScores(wins, champs, apps),
       tournaments: Number(tourneys) || 0,
     };
   }
@@ -203,6 +241,7 @@ export async function getScores(): Promise<Scores> {
 
 export async function recordResult(
   matchWins: Record<string, number>,
+  matchAppearances: Record<string, number>,
   championId: string
 ): Promise<Stats> {
   const redis = await getRedis();
@@ -210,6 +249,9 @@ export async function recordResult(
     const pipe = redis.pipeline();
     for (const [id, count] of Object.entries(matchWins)) {
       if (count > 0) pipe.hincrby(KV_WINS_KEY, id, count);
+    }
+    for (const [id, count] of Object.entries(matchAppearances)) {
+      if (count > 0) pipe.hincrby(KV_APPEARANCES_KEY, id, count);
     }
     if (championId) {
       pipe.hincrby(KV_CHAMPS_KEY, championId, 1);
@@ -221,12 +263,16 @@ export async function recordResult(
   if (isServerless()) throw noStorageError();
   const stats = await readLocalStats();
   for (const [id, count] of Object.entries(matchWins)) {
-    const cur = stats.scores[id] ?? { wins: 0, championships: 0 };
-    stats.scores[id] = { ...cur, wins: cur.wins + count };
+    const cur = ensureEntry(stats.scores, id);
+    cur.wins += count;
+  }
+  for (const [id, count] of Object.entries(matchAppearances)) {
+    const cur = ensureEntry(stats.scores, id);
+    cur.appearances += count;
   }
   if (championId) {
-    const cur = stats.scores[championId] ?? { wins: 0, championships: 0 };
-    stats.scores[championId] = { ...cur, championships: cur.championships + 1 };
+    const cur = ensureEntry(stats.scores, championId);
+    cur.championships += 1;
   }
   stats.tournaments += 1;
   await writeLocal(LOCAL_STATS_FILE, stats);

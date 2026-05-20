@@ -7,11 +7,18 @@ import { buildFirstRound, roundLabel } from "@/lib/tournament";
 
 type Props = {
   items: Item[];
+  isAdmin: boolean;
 };
 
 type Stage = "playing" | "done";
 
-export default function PlayClient({ items }: Props) {
+function formatRate(numer: number, denom: number): string {
+  if (!denom || denom <= 0) return "—";
+  const pct = Math.min(100, Math.round((numer / denom) * 100));
+  return `${pct}%`;
+}
+
+export default function PlayClient({ items, isAdmin }: Props) {
   const [setup] = useState(() => buildFirstRound(items));
   const [roundSize, setRoundSize] = useState<number>(setup.roundSize);
   const [pending, setPending] = useState<Item[]>(setup.matches);
@@ -20,6 +27,9 @@ export default function PlayClient({ items }: Props) {
   const [stage, setStage] = useState<Stage>("playing");
   const [matchesPlayed, setMatchesPlayed] = useState(0);
   const [matchWins, setMatchWins] = useState<Record<string, number>>({});
+  const [matchAppearances, setMatchAppearances] = useState<
+    Record<string, number>
+  >({});
   const [champion, setChampion] = useState<Item | null>(null);
   const [rankingItems, setRankingItems] = useState<Item[]>([]);
   const [scores, setScores] = useState<Scores>({});
@@ -45,7 +55,13 @@ export default function PlayClient({ items }: Props) {
       ...matchWins,
       [winner.id]: (matchWins[winner.id] ?? 0) + 1,
     };
+    const nextMatchAppearances = {
+      ...matchAppearances,
+      [left.id]: (matchAppearances[left.id] ?? 0) + 1,
+      [right.id]: (matchAppearances[right.id] ?? 0) + 1,
+    };
     setMatchWins(nextMatchWins);
+    setMatchAppearances(nextMatchAppearances);
     setMatchesPlayed(matchesPlayed + 1);
 
     if (matchIdx + 1 < totalMatchesThisRound) {
@@ -77,6 +93,7 @@ export default function PlayClient({ items }: Props) {
           body: JSON.stringify({
             championId: champion?.id ?? "",
             matchWins,
+            matchAppearances,
           }),
         });
         if (res.ok) {
@@ -100,13 +117,18 @@ export default function PlayClient({ items }: Props) {
         setSubmitted(true);
       }
     })();
-  }, [stage, matchWins, champion]);
+  }, [stage, matchWins, matchAppearances, champion]);
 
   if (stage === "done" && champion) {
     const ranked = [...rankingItems]
       .map((item) => {
-        const s = scores[item.id] ?? { wins: 0, championships: 0 };
-        return { item, wins: s.wins, championships: s.championships };
+        const s = scores[item.id] ?? { wins: 0, championships: 0, appearances: 0 };
+        return {
+          item,
+          wins: s.wins,
+          championships: s.championships,
+          appearances: s.appearances,
+        };
       })
       .filter((r) => r.wins > 0 || r.championships > 0)
       .sort((a, b) => {
@@ -128,7 +150,7 @@ export default function PlayClient({ items }: Props) {
             className="row"
             style={{ justifyContent: "center", marginTop: 16 }}
           >
-            <Link className="btn primary" href="/">홈으로</Link>
+            <Link className="btn primary" href="/"><span className="arrow-back">←</span>처음으로</Link>
           </div>
         </section>
 
@@ -140,7 +162,7 @@ export default function PlayClient({ items }: Props) {
                 모든 사용자의 결과를 합산한 결과입니다
               </div>
             </div>
-            {submitted && !submitError && tournaments > 0 && (
+            {isAdmin && submitted && !submitError && tournaments > 0 && (
               <div className="tourney-counter">
                 <span className="tourney-counter-num">{tournaments}</span>
                 <span className="tourney-counter-label">번째 진행</span>
@@ -160,28 +182,45 @@ export default function PlayClient({ items }: Props) {
             <div className="empty">아직 집계된 결과가 없습니다.</div>
           ) : (
             <ol className="rank-list">
-              {ranked.map((r, idx) => (
-                <li key={r.item.id} className="rank-item">
-                  <div className={`rank-num rank-${idx + 1}`}>
-                    {idx === 0 ? "🥇" : idx === 1 ? "🥈" : idx === 2 ? "🥉" : idx + 1}
-                  </div>
-                  <div className="rank-body">
-                    <div className="rank-text">{r.item.text}</div>
-                    <div className="rank-bar">
-                      <div
-                        className="rank-bar-fill"
-                        style={{
-                          width: `${Math.max(4, (r.wins / Math.max(1, maxWins)) * 100)}%`,
-                        }}
-                      />
+              {ranked.map((r, idx) => {
+                const champRate = formatRate(r.championships, tournaments);
+                const winRate = formatRate(r.wins, r.appearances);
+                return (
+                  <li key={r.item.id} className="rank-item">
+                    <div className={`rank-num rank-${idx + 1}`}>
+                      {idx === 0
+                        ? "🥇"
+                        : idx === 1
+                        ? "🥈"
+                        : idx === 2
+                        ? "🥉"
+                        : idx + 1}
                     </div>
-                  </div>
-                  <div className="rank-stats">
-                    <span title="우승 횟수">🏆 {r.championships}</span>
-                    <span title="매치 승리 횟수">⚔ {r.wins}</span>
-                  </div>
-                </li>
-              ))}
+                    <div className="rank-body">
+                      <div className="rank-text">{r.item.text}</div>
+                      <div className="rank-bar">
+                        <div
+                          className="rank-bar-fill"
+                          style={{
+                            width: `${Math.max(
+                              4,
+                              (r.wins / Math.max(1, maxWins)) * 100
+                            )}%`,
+                          }}
+                        />
+                      </div>
+                    </div>
+                    <div className="rank-stats">
+                      <span title="우승 횟수 · 우승비율">
+                        🏆 {r.championships}회 · {champRate}
+                      </span>
+                      <span title="매치 승리 / 출전 · 승률">
+                        ⚔ {r.wins}/{r.appearances} · {winRate}
+                      </span>
+                    </div>
+                  </li>
+                );
+              })}
             </ol>
           )}
         </section>
