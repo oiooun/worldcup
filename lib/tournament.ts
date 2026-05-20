@@ -1,9 +1,9 @@
 import type { Item } from "./storage";
 
-export function largestPowerOfTwo(n: number): number {
-  if (n < 2) return 0;
+export function nextPowerOfTwo(n: number): number {
+  if (n < 2) return n < 1 ? 0 : 1;
   let p = 1;
-  while (p * 2 <= n) p *= 2;
+  while (p < n) p *= 2;
   return p;
 }
 
@@ -16,21 +16,24 @@ export function shuffle<T>(arr: T[]): T[] {
   return a;
 }
 
-export function pickTournamentItems(items: Item[], size?: number): Item[] {
+export function buildFirstRound(items: Item[]): {
+  matches: Item[];
+  byes: Item[];
+  roundSize: number;
+} {
   const shuffled = shuffle(items);
-  const cap = size ?? largestPowerOfTwo(items.length);
-  return shuffled.slice(0, cap);
+  const n = shuffled.length;
+  const B = nextPowerOfTwo(n);
+  const byeCount = Math.max(0, B - n);
+  return {
+    matches: shuffled.slice(byeCount),
+    byes: shuffled.slice(0, byeCount),
+    roundSize: B,
+  };
 }
 
-export function roundLabel(remaining: number): string {
-  if (remaining === 2) return "결승";
-  if (remaining === 4) return "4강";
-  return `${remaining}강`;
-}
-
-export function availableBracketSizes(itemCount: number): number[] {
-  const max = largestPowerOfTwo(itemCount);
-  const sizes: number[] = [];
-  for (let s = 2; s <= max; s *= 2) sizes.push(s);
-  return sizes;
+export function roundLabel(roundSize: number): string {
+  if (roundSize <= 2) return "결승";
+  if (roundSize === 4) return "4강";
+  return `${roundSize}강`;
 }

@@ -3,78 +3,70 @@
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Item, Scores } from "@/lib/storage";
-import { pickTournamentItems, roundLabel } from "@/lib/tournament";
+import { buildFirstRound, roundLabel } from "@/lib/tournament";
 
 type Props = {
   items: Item[];
-  size: number;
 };
 
 type Stage = "playing" | "done";
 
-export default function PlayClient({ items, size }: Props) {
-  const [bracket, setBracket] = useState<Item[]>(() =>
-    pickTournamentItems(items, size)
-  );
-  const [winners, setWinners] = useState<Item[]>([]);
+export default function PlayClient({ items }: Props) {
+  const [setup] = useState(() => buildFirstRound(items));
+  const [roundSize, setRoundSize] = useState<number>(setup.roundSize);
+  const [pending, setPending] = useState<Item[]>(setup.matches);
+  const [advancing, setAdvancing] = useState<Item[]>(setup.byes);
   const [matchIdx, setMatchIdx] = useState(0);
   const [stage, setStage] = useState<Stage>("playing");
-  const [history, setHistory] = useState<Item[]>([]);
+  const [matchesPlayed, setMatchesPlayed] = useState(0);
   const [matchWins, setMatchWins] = useState<Record<string, number>>({});
+  const [champion, setChampion] = useState<Item | null>(null);
   const [rankingItems, setRankingItems] = useState<Item[]>([]);
   const [scores, setScores] = useState<Scores>({});
   const [submitted, setSubmitted] = useState(false);
   const submitOnceRef = useRef(false);
 
-  const totalMatchesThisRound = bracket.length / 2;
-  const remainingInRound = bracket.length;
-  const label = roundLabel(remainingInRound);
-  const left = bracket[matchIdx * 2];
-  const right = bracket[matchIdx * 2 + 1];
+  const totalMatchesThisRound = pending.length / 2;
+  const totalMatchesOverall = Math.max(0, items.length - 1);
+  const left = pending[matchIdx * 2];
+  const right = pending[matchIdx * 2 + 1];
+  const label = roundLabel(roundSize);
 
-  const overallProgress = useMemo(() => {
-    const startSize = size;
-    let total = 0;
-    let n = startSize;
-    while (n > 1) {
-      total += n / 2;
-      n /= 2;
-    }
-    return { total, done: history.length };
-  }, [size, history.length]);
+  const percent = useMemo(() => {
+    if (totalMatchesOverall <= 0) return 0;
+    return Math.round((matchesPlayed / totalMatchesOverall) * 100);
+  }, [matchesPlayed, totalMatchesOverall]);
 
   function pick(winner: Item) {
-    const nextWinners = [...winners, winner];
-    const nextHistory = [...history, winner];
+    const newAdvancing = [...advancing, winner];
     const nextMatchWins = {
       ...matchWins,
       [winner.id]: (matchWins[winner.id] ?? 0) + 1,
     };
     setMatchWins(nextMatchWins);
+    setMatchesPlayed(matchesPlayed + 1);
 
     if (matchIdx + 1 < totalMatchesThisRound) {
-      setWinners(nextWinners);
+      setAdvancing(newAdvancing);
       setMatchIdx(matchIdx + 1);
-      setHistory(nextHistory);
       return;
     }
-    if (nextWinners.length === 1) {
-      setWinners(nextWinners);
-      setHistory(nextHistory);
+    if (newAdvancing.length === 1) {
+      setAdvancing(newAdvancing);
+      setChampion(newAdvancing[0]);
       setStage("done");
       return;
     }
-    setBracket(nextWinners);
-    setWinners([]);
+    setRoundSize(Math.max(1, roundSize / 2));
+    setPending(newAdvancing);
+    setAdvancing([]);
     setMatchIdx(0);
-    setHistory(nextHistory);
   }
 
   useEffect(() => {
     if (stage !== "done") return;
     if (submitOnceRef.current) return;
     submitOnceRef.current = true;
-    const champion = winners[0];
     (async () => {
       try {
         const res = await fetch("/api/scores", {
@@ -94,10 +86,9 @@ export default function PlayClient({ items, size }: Props) {
         setSubmitted(true);
       }
     })();
-  }, [stage, matchWins, winners]);
+  }, [stage, matchWins, champion]);
 
-  if (stage === "done") {
-    const champ = winners[0];
+  if (stage === "done" && champion) {
     const ranked = [...rankingItems]
       .map((item) => {
         const s = scores[item.id] ?? { wins: 0, championships: 0 };
@@ -109,6 +100,7 @@ export default function PlayClient({ items, size }: Props) {
           return b.championships - a.championships;
         return b.wins - a.wins;
       });
+    const maxWins = ranked[0]?.wins ?? 1;
 
     return (
       <>
@@ -117,7 +109,7 @@ export default function PlayClient({ items, size }: Props) {
           <div className="muted" style={{ fontSize: 14, marginTop: 4 }}>
             최악으로 선정된 사람
           </div>
-          <div className="name">{champ.text}</div>
+          <div className="name">{champion.text}</div>
           <div
             className="row"
             style={{ justifyContent: "center", marginTop: 16 }}
@@ -127,9 +119,9 @@ export default function PlayClient({ items, size }: Props) {
         </section>
 
         <section className="panel" style={{ marginTop: 16 }}>
-          <div className="row between">
+          <div className="row between" style={{ marginBottom: 4 }}>
             <div>
-              <div style={{ fontWeight: 800, fontSize: 18 }}>누적 순위</div>
+              <div style={{ fontWeight: 800, fontSize: 18 }}>📊 누적 순위</div>
               <div className="muted" style={{ fontSize: 13 }}>
                 모든 사용자의 결과를 합산한 결과입니다
               </div>
@@ -143,8 +135,20 @@ export default function PlayClient({ items, size }: Props) {
             <ol className="rank-list">
               {ranked.map((r, idx) => (
                 <li key={r.item.id} className="rank-item">
-                  <div className={`rank-num rank-${idx + 1}`}>{idx + 1}</div>
-                  <div className="rank-text">{r.item.text}</div>
+                  <div className={`rank-num rank-${idx + 1}`}>
+                    {idx === 0 ? "🥇" : idx === 1 ? "🥈" : idx === 2 ? "🥉" : idx + 1}
+                  </div>
+                  <div className="rank-body">
+                    <div className="rank-text">{r.item.text}</div>
+                    <div className="rank-bar">
+                      <div
+                        className="rank-bar-fill"
+                        style={{
+                          width: `${Math.max(4, (r.wins / Math.max(1, maxWins)) * 100)}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
                   <div className="rank-stats">
                     <span title="우승 횟수">🏆 {r.championships}</span>
                     <span title="매치 승리 횟수">⚔ {r.wins}</span>
@@ -158,34 +162,30 @@ export default function PlayClient({ items, size }: Props) {
     );
   }
 
-  const percent = overallProgress.total
-    ? Math.round((overallProgress.done / overallProgress.total) * 100)
-    : 0;
-
   return (
     <section>
-      <div className="panel">
+      <div className="panel round-panel">
         <div className="row between">
           <div>
-            <div style={{ fontWeight: 800, fontSize: 18 }}>{label}</div>
-            <div className="muted" style={{ fontSize: 13 }}>
+            <div className="round-badge">{label}</div>
+            <div className="muted" style={{ fontSize: 13, marginTop: 4 }}>
               {matchIdx + 1} / {totalMatchesThisRound} 경기
             </div>
           </div>
           <div className="muted" style={{ fontSize: 13 }}>
-            전체 진행 {percent}%
+            전체 진행 <strong style={{ color: "var(--text)" }}>{percent}%</strong>
           </div>
         </div>
         <div className="progress"><div style={{ width: `${percent}%` }} /></div>
       </div>
 
-      <div className="match-stage">
+      <div className="match-stage" key={`${roundSize}-${matchIdx}`}>
         <button className="match-card" onClick={() => pick(left)}>
-          {left.text}
+          <span className="match-card-inner">{left.text}</span>
         </button>
         <div className="vs">VS</div>
         <button className="match-card" onClick={() => pick(right)}>
-          {right.text}
+          <span className="match-card-inner">{right.text}</span>
         </button>
       </div>
     </section>
