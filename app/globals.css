@@ -491,6 +491,28 @@ button {
   align-items: flex-end;
 }
 
+.tourney-counter {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  background: var(--accent-soft);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 12px;
+  white-space: nowrap;
+}
+.tourney-counter-num {
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+.tourney-counter-label {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
 @media (max-width: 480px) {
   .hero-num { font-size: 56px; }
   .match-card { font-size: 18px; padding: 28px 20px; min-height: 140px; }

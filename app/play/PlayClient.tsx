@@ -23,7 +23,9 @@ export default function PlayClient({ items }: Props) {
   const [champion, setChampion] = useState<Item | null>(null);
   const [rankingItems, setRankingItems] = useState<Item[]>([]);
   const [scores, setScores] = useState<Scores>({});
+  const [tournaments, setTournaments] = useState<number>(0);
   const [submitted, setSubmitted] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const submitOnceRef = useRef(false);
 
   const totalMatchesThisRound = pending.length / 2;
@@ -78,10 +80,22 @@ export default function PlayClient({ items }: Props) {
           }),
         });
         if (res.ok) {
-          const data = (await res.json()) as { items: Item[]; scores: Scores };
+          const data = (await res.json()) as {
+            items: Item[];
+            scores: Scores;
+            tournaments?: number;
+          };
           setRankingItems(data.items);
           setScores(data.scores);
+          if (typeof data.tournaments === "number") {
+            setTournaments(data.tournaments);
+          }
+        } else {
+          const data = (await res.json().catch(() => null)) as { error?: string } | null;
+          setSubmitError(data?.error || `결과 저장 실패 (HTTP ${res.status})`);
         }
+      } catch (e) {
+        setSubmitError(e instanceof Error ? e.message : "결과 저장 중 오류가 발생했습니다.");
       } finally {
         setSubmitted(true);
       }
@@ -126,9 +140,22 @@ export default function PlayClient({ items }: Props) {
                 모든 사용자의 결과를 합산한 결과입니다
               </div>
             </div>
+            {submitted && !submitError && tournaments > 0 && (
+              <div className="tourney-counter">
+                <span className="tourney-counter-num">{tournaments}</span>
+                <span className="tourney-counter-label">번째 진행</span>
+              </div>
+            )}
           </div>
           {!submitted ? (
             <div className="empty">집계 중…</div>
+          ) : submitError ? (
+            <div className="empty">
+              <div className="error">{submitError}</div>
+              <div className="muted" style={{ fontSize: 12 }}>
+                Vercel Upstash Redis 환경변수가 설정되어 있는지 확인해 보세요.
+              </div>
+            </div>
           ) : ranked.length === 0 ? (
             <div className="empty">아직 집계된 결과가 없습니다.</div>
           ) : (

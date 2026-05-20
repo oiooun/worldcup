@@ -9,10 +9,19 @@ export type Item = {
 
 export type Scores = Record<string, { wins: number; championships: number }>;
 
-const KV_KEY = "worldcup:items";
-const KV_SCORES_KEY = "worldcup:scores";
-const LOCAL_FILE = path.join(process.cwd(), "data", "local.json");
-const LOCAL_SCORES_FILE = path.join(process.cwd(), "data", "scores.json");
+export type Stats = {
+  scores: Scores;
+  tournaments: number;
+};
+
+const KV_ITEMS_KEY = "worldcup:items";
+const KV_WINS_KEY = "worldcup:wins";
+const KV_CHAMPS_KEY = "worldcup:champs";
+const KV_TOURNEYS_KEY = "worldcup:tournaments";
+
+const LOCAL_ITEMS_FILE = path.join(process.cwd(), "data", "local.json");
+const LOCAL_STATS_FILE = path.join(process.cwd(), "data", "stats.json");
+const LOCAL_OLD_SCORES_FILE = path.join(process.cwd(), "data", "scores.json");
 
 function getRedisCreds(): { url: string; token: string } | null {
   const url =
@@ -27,9 +36,17 @@ function getRedisCreds(): { url: string; token: string } | null {
   return { url, token };
 }
 
+type RedisHash = Record<string, unknown> | null;
+
 type RedisLike = {
   get: <T>(key: string) => Promise<T | null>;
   set: (key: string, value: unknown) => Promise<unknown>;
+  hgetall: (key: string) => Promise<RedisHash>;
+  pipeline: () => {
+    hincrby: (key: string, field: string, increment: number) => unknown;
+    incr: (key: string) => unknown;
+    exec: () => Promise<unknown[]>;
+  };
 };
 
 let cachedClient: RedisLike | null = null;
@@ -49,15 +66,14 @@ function isServerless(): boolean {
 
 function noStorageError(): Error {
   return new Error(
-    "스토리지가 설정되지 않았습니다. Vercel 대시보드에서 Upstash Redis 통합을 추가하고 KV_REST_API_URL / KV_REST_API_TOKEN(또는 UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN) 환경변수가 주입되었는지 확인한 뒤 재배포하세요."
+    "스토리지가 설정되지 않았습니다. Vercel 대시보드에서 Upstash Redis 통합을 추가하고 KV_REST_API_URL / KV_REST_API_TOKEN (또는 UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN) 환경변수가 주입되었는지 확인한 뒤 재배포하세요."
   );
 }
 
 async function readLocal<T>(file: string, fallback: T): Promise<T> {
   try {
     const raw = await fs.readFile(file, "utf8");
-    const parsed = JSON.parse(raw);
-    return parsed as T;
+    return JSON.parse(raw) as T;
   } catch {
     return fallback;
   }
@@ -68,37 +84,27 @@ async function writeLocal(file: string, value: unknown): Promise<void> {
   await fs.writeFile(file, JSON.stringify(value, null, 2), "utf8");
 }
 
-async function readKey<T>(key: string, file: string, fallback: T): Promise<T> {
-  const redis = await getRedis();
-  if (redis) {
-    const v = await redis.get<T>(key);
-    return v ?? fallback;
-  }
-  if (isServerless()) {
-    throw noStorageError();
-  }
-  return readLocal(file, fallback);
-}
-
-async function writeKey(key: string, file: string, value: unknown): Promise<void> {
-  const redis = await getRedis();
-  if (redis) {
-    await redis.set(key, value);
-    return;
-  }
-  if (isServerless()) {
-    throw noStorageError();
-  }
-  await writeLocal(file, value);
-}
+// ----- Items -----
 
 export async function getItems(): Promise<Item[]> {
-  const arr = await readKey<Item[]>(KV_KEY, LOCAL_FILE, []);
+  const redis = await getRedis();
+  if (redis) {
+    const arr = await redis.get<Item[]>(KV_ITEMS_KEY);
+    return Array.isArray(arr) ? arr : [];
+  }
+  if (isServerless()) throw noStorageError();
+  const arr = await readLocal<Item[]>(LOCAL_ITEMS_FILE, []);
   return Array.isArray(arr) ? arr : [];
 }
 
 async function saveItems(items: Item[]): Promise<void> {
-  await writeKey(KV_KEY, LOCAL_FILE, items);
+  const redis = await getRedis();
+  if (redis) {
+    await redis.set(KV_ITEMS_KEY, items);
+    return;
+  }
+  if (isServerless()) throw noStorageError();
+  await writeLocal(LOCAL_ITEMS_FILE, items);
 }
 
 export async function addItem(text: string): Promise<Item> {
@@ -134,28 +140,95 @@ export async function replaceItems(items: Item[]): Promise<void> {
   await saveItems(items);
 }
 
-export async function getScores(): Promise<Scores> {
-  const v = await readKey<Scores>(KV_SCORES_KEY, LOCAL_SCORES_FILE, {});
-  return v && typeof v === "object" ? v : {};
+// ----- Stats / Scoring -----
+
+function mergeScores(wins: RedisHash, champs: RedisHash): Scores {
+  const result: Scores = {};
+  if (wins) {
+    for (const [id, v] of Object.entries(wins)) {
+      const n = Number(v);
+      if (!Number.isFinite(n) || n === 0) continue;
+      result[id] = { wins: n, championships: 0 };
+    }
+  }
+  if (champs) {
+    for (const [id, v] of Object.entries(champs)) {
+      const n = Number(v);
+      if (!Number.isFinite(n) || n === 0) continue;
+      if (!result[id]) result[id] = { wins: 0, championships: 0 };
+      result[id].championships = n;
+    }
+  }
+  return result;
 }
 
-async function saveScores(scores: Scores): Promise<void> {
-  await writeKey(KV_SCORES_KEY, LOCAL_SCORES_FILE, scores);
+async function readLocalStats(): Promise<Stats> {
+  const fresh = await readLocal<{ scores?: Scores; tournaments?: number } | null>(
+    LOCAL_STATS_FILE,
+    null
+  );
+  if (fresh && typeof fresh === "object" && "scores" in fresh) {
+    return {
+      scores: (fresh.scores as Scores) ?? {},
+      tournaments: Number(fresh.tournaments) || 0,
+    };
+  }
+  const old = await readLocal<Scores | null>(LOCAL_OLD_SCORES_FILE, null);
+  if (old && typeof old === "object") {
+    return { scores: old, tournaments: 0 };
+  }
+  return { scores: {}, tournaments: 0 };
+}
+
+export async function getStats(): Promise<Stats> {
+  const redis = await getRedis();
+  if (redis) {
+    const [wins, champs, tourneys] = await Promise.all([
+      redis.hgetall(KV_WINS_KEY),
+      redis.hgetall(KV_CHAMPS_KEY),
+      redis.get<number | string>(KV_TOURNEYS_KEY),
+    ]);
+    return {
+      scores: mergeScores(wins, champs),
+      tournaments: Number(tourneys) || 0,
+    };
+  }
+  if (isServerless()) throw noStorageError();
+  return readLocalStats();
+}
+
+export async function getScores(): Promise<Scores> {
+  return (await getStats()).scores;
 }
 
 export async function recordResult(
   matchWins: Record<string, number>,
   championId: string
-): Promise<Scores> {
-  const scores = await getScores();
+): Promise<Stats> {
+  const redis = await getRedis();
+  if (redis) {
+    const pipe = redis.pipeline();
+    for (const [id, count] of Object.entries(matchWins)) {
+      if (count > 0) pipe.hincrby(KV_WINS_KEY, id, count);
+    }
+    if (championId) {
+      pipe.hincrby(KV_CHAMPS_KEY, championId, 1);
+    }
+    pipe.incr(KV_TOURNEYS_KEY);
+    await pipe.exec();
+    return await getStats();
+  }
+  if (isServerless()) throw noStorageError();
+  const stats = await readLocalStats();
   for (const [id, count] of Object.entries(matchWins)) {
-    const cur = scores[id] ?? { wins: 0, championships: 0 };
-    scores[id] = { ...cur, wins: cur.wins + count };
+    const cur = stats.scores[id] ?? { wins: 0, championships: 0 };
+    stats.scores[id] = { ...cur, wins: cur.wins + count };
   }
   if (championId) {
-    const cur = scores[championId] ?? { wins: 0, championships: 0 };
-    scores[championId] = { ...cur, championships: cur.championships + 1 };
+    const cur = stats.scores[championId] ?? { wins: 0, championships: 0 };
+    stats.scores[championId] = { ...cur, championships: cur.championships + 1 };
   }
-  await saveScores(scores);
-  return scores;
+  stats.tournaments += 1;
+  await writeLocal(LOCAL_STATS_FILE, stats);
+  return stats;
 }

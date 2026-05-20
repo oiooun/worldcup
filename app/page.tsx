@@ -1,11 +1,27 @@
 import Link from "next/link";
-import { getItems } from "@/lib/storage";
+import { getItems, getStats } from "@/lib/storage";
+import { isAdminAuthed } from "@/lib/auth";
 import { nextPowerOfTwo } from "@/lib/tournament";
 
 export const dynamic = "force-dynamic";
 
 export default async function HomePage() {
-  const items = await getItems();
+  const isAdmin = isAdminAuthed();
+  let items: Awaited<ReturnType<typeof getItems>> = [];
+  let tournaments = 0;
+  let storageError: string | null = null;
+  try {
+    if (isAdmin) {
+      const [it, stats] = await Promise.all([getItems(), getStats()]);
+      items = it;
+      tournaments = stats.tournaments;
+    } else {
+      items = await getItems();
+    }
+  } catch (e) {
+    storageError = e instanceof Error ? e.message : String(e);
+  }
+
   const canStart = items.length >= 2;
   const bracket = nextPowerOfTwo(items.length);
   const byes = Math.max(0, bracket - items.length);
@@ -25,6 +41,17 @@ export default async function HomePage() {
         </nav>
       </header>
 
+      {storageError && (
+        <section className="panel" style={{ marginBottom: 16, borderColor: "#fca5a5" }}>
+          <div style={{ fontWeight: 700, color: "#b91c1c", marginBottom: 6 }}>
+            ⚠ 스토리지 연결 오류
+          </div>
+          <div className="muted" style={{ fontSize: 13, lineHeight: 1.5 }}>
+            {storageError}
+          </div>
+        </section>
+      )}
+
       <section className="hero">
         <div className="hero-stat">
           <div className="hero-label">등록된 후보</div>
@@ -38,6 +65,11 @@ export default async function HomePage() {
               {byes > 0 && (
                 <span className="badge muted-badge">
                   {byes}명 부전승
+                </span>
+              )}
+              {isAdmin && tournaments > 0 && (
+                <span className="badge muted-badge">
+                  지금까지 {tournaments}번 진행됨
                 </span>
               )}
             </div>
